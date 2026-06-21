@@ -6,12 +6,12 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 from .data import SequenceData
 from .metrics import evaluate_full_catalog
 from .models import MatrixFactorization, SASRec, TwoTower
-from .sampling import PointwiseDataset, SASRecDataset, padded_history
+from .sampling import SASRecDataset, padded_history
 
 
 def seed_everything(seed: int) -> None:
@@ -22,9 +22,49 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def sample_batch_negatives(
+    users: torch.Tensor,
+    num_items: int,
+    negatives: int,
+    seen_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Sample unobserved items for a user batch directly on its device."""
+    sampled = torch.randint(
+        1, num_items + 1, (users.size(0), negatives), device=users.device
+    )
+    invalid = seen_mask[users[:, None], sampled]
+    while invalid.any():
+        sampled[invalid] = torch.randint(
+            1, num_items + 1, (int(invalid.sum().item()),), device=users.device
+        )
+        invalid = seen_mask[users[:, None], sampled]
+    return sampled
+
+
 def train_pointwise(model: nn.Module, data: SequenceData, epochs: int, batch_size: int, lr: float, negatives: int, device: torch.device) -> list[float]:
-    dataset = PointwiseDataset(data.train, data.num_items, negatives=negatives)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    positive_users = torch.tensor(
+        [user for user, sequence in data.train.items() for _ in sequence],
+        dtype=torch.long,
+    )
+    positive_items = torch.tensor(
+        [item for sequence in data.train.values() for item in sequence],
+        dtype=torch.long,
+    )
+    dataset = TensorDataset(positive_users, positive_items)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=device.type == "cuda",
+        persistent_workers=True,
+    )
+    seen_mask = torch.zeros(
+        (data.num_users + 1, data.num_items + 1), dtype=torch.bool, device=device
+    )
+    seen_mask[
+        positive_users.to(device), positive_items.to(device)
+    ] = True
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     criterion = nn.BCEWithLogitsLoss()
     losses = []
@@ -32,20 +72,39 @@ def train_pointwise(model: nn.Module, data: SequenceData, epochs: int, batch_siz
     for _ in range(epochs):
         model.train()
         total = 0.0
-        for users, items, labels in loader:
-            users, items, labels = users.to(device), items.to(device), labels.to(device)
+        examples = 0
+        for users, positives in loader:
+            users = users.to(device, non_blocking=True)
+            positives = positives.to(device, non_blocking=True)
+            sampled = sample_batch_negatives(
+                users, data.num_items, negatives, seen_mask
+            )
+            items = torch.cat((positives[:, None], sampled), dim=1)
+            batch_users = users[:, None].expand_as(items)
+            labels = torch.zeros_like(items, dtype=torch.float)
+            labels[:, 0] = 1.0
             optimizer.zero_grad(set_to_none=True)
-            loss = criterion(model(users, items), labels)
+            loss = criterion(
+                model(batch_users.reshape(-1), items.reshape(-1)),
+                labels.reshape(-1),
+            )
             loss.backward()
             optimizer.step()
-            total += loss.item() * users.size(0)
-        losses.append(total / len(dataset))
+            batch_examples = items.numel()
+            total += loss.item() * batch_examples
+            examples += batch_examples
+        losses.append(total / examples)
     return losses
 
 
 def train_sasrec(model: SASRec, data: SequenceData, epochs: int, batch_size: int, lr: float, device: torch.device) -> list[float]:
     dataset = SASRecDataset(data.train, data.num_items, model.max_len)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        pin_memory=device.type == "cuda",
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     criterion = nn.BCEWithLogitsLoss(reduction="none")
     losses = []
@@ -54,7 +113,9 @@ def train_sasrec(model: SASRec, data: SequenceData, epochs: int, batch_size: int
         model.train()
         total, tokens = 0.0, 0
         for sequences, positives, negatives in loader:
-            sequences, positives, negatives = sequences.to(device), positives.to(device), negatives.to(device)
+            sequences = sequences.to(device, non_blocking=True)
+            positives = positives.to(device, non_blocking=True)
+            negatives = negatives.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             pos_logits, neg_logits = model.training_logits(sequences, positives, negatives)
             mask = positives.ne(0)
@@ -108,4 +169,3 @@ def load_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> n
         raise ValueError(f"Unknown model type: {name}")
     model.load_state_dict(payload["state_dict"])
     return model.to(device).eval()
-

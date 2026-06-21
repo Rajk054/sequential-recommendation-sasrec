@@ -20,7 +20,9 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
     parser.add_argument("--synthetic", action="store_true", help="Run a fast integration check without downloading MovieLens")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=None, help="Deprecated: override both model-specific batch sizes")
+    parser.add_argument("--pointwise-batch-size", type=int, default=4096)
+    parser.add_argument("--sequence-batch-size", type=int, default=256)
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--max-len", type=int, default=100)
     parser.add_argument("--negatives", type=int, default=4)
@@ -33,6 +35,10 @@ def main() -> None:
     args = arguments()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    pointwise_batch_size = args.batch_size or args.pointwise_batch_size
+    sequence_batch_size = args.batch_size or args.sequence_batch_size
+    print(f"Using device: {device}")
+    print(f"Batch sizes: pointwise={pointwise_batch_size}, sequence={sequence_batch_size}")
     data = synthetic_data() if args.synthetic else load_movielens(download_movielens(args.data_dir))
     args.artifacts_dir.mkdir(parents=True, exist_ok=True)
     save_mappings(data, args.artifacts_dir / "dataset.json")
@@ -46,9 +52,9 @@ def main() -> None:
     for name, (model, config) in specs.items():
         started = time.perf_counter()
         if name == "sasrec":
-            losses = train_sasrec(model, data, args.epochs, args.batch_size, args.lr, device)
+            losses = train_sasrec(model, data, args.epochs, sequence_batch_size, args.lr, device)
         else:
-            losses = train_pointwise(model, data, args.epochs, args.batch_size, args.lr, args.negatives, device)
+            losses = train_pointwise(model, data, args.epochs, pointwise_batch_size, args.lr, args.negatives, device)
         validation = evaluate_model(model, name, data, "validation", args.max_len, device)
         test = evaluate_model(model, name, data, "test", args.max_len, device)
         save_checkpoint(model, name, args.artifacts_dir / f"{name}.pt", config)
@@ -61,7 +67,7 @@ def main() -> None:
             metric: relative_gain(results["sasrec"]["test"][metric], results[baseline]["test"][metric])
             for metric in ("NDCG@10", "Recall@10")
         }
-    results["run"] = {"seed": args.seed, "epochs": args.epochs, "device": str(device), "python": platform.python_version(), "torch": torch.__version__, "synthetic": args.synthetic}
+    results["run"] = {"seed": args.seed, "epochs": args.epochs, "device": str(device), "pointwise_batch_size": pointwise_batch_size, "sequence_batch_size": sequence_batch_size, "python": platform.python_version(), "torch": torch.__version__, "synthetic": args.synthetic}
     (args.artifacts_dir / "evaluation.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"Wrote {args.artifacts_dir / 'evaluation.json'}")
 

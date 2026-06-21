@@ -44,8 +44,12 @@ python train.py \
   --epochs 20 \
   --dim 64 \
   --max-len 100 \
-  --negatives 4
+  --negatives 4 \
+  --pointwise-batch-size 4096 \
+  --sequence-batch-size 256
 ```
+
+Pointwise negatives are sampled in batches on the selected device. The separate batch-size options keep MF and two-tower GPU work large without forcing the Transformer's sequence batch to consume the same amount of memory.
 
 Checkpoints, mappings, interaction histories, and evaluation metrics are written to `artifacts/`. For a proper comparison I run the experiment with several seeds and report the mean and standard deviation, rather than relying on one favorable run.
 

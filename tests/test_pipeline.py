@@ -5,6 +5,7 @@ import torch
 from recsys.data import load_movielens, synthetic_data
 from recsys.models import MatrixFactorization, SASRec, TwoTower
 from recsys.sampling import PointwiseDataset, SASRecDataset, padded_history
+from recsys.training import sample_batch_negatives
 
 
 def test_leave_two_out_is_chronological(tmp_path: Path):
@@ -41,6 +42,15 @@ def test_sasrec_short_history_keeps_inputs_and_targets_aligned():
     observed_inputs = inputs[inputs.ne(0)]
     observed_targets = positives[positives.ne(0)]
     assert torch.equal(observed_inputs[1:], observed_targets[:-1])
+
+
+def test_batched_negatives_exclude_observed_items():
+    users = torch.tensor([1, 2])
+    seen = torch.zeros((3, 7), dtype=torch.bool)
+    seen[1, torch.tensor([1, 2, 3])] = True
+    seen[2, torch.tensor([4, 5, 6])] = True
+    sampled = sample_batch_negatives(users, 6, 20, seen)
+    assert not seen[users[:, None], sampled].any()
 
 
 def test_model_score_shapes():
