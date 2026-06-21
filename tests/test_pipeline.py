@@ -32,6 +32,17 @@ def test_negative_samples_are_unobserved():
             assert item.item() not in set(data.train[user.item()])
 
 
+def test_sasrec_short_history_keeps_inputs_and_targets_aligned():
+    data = synthetic_data(num_users=4)
+    inputs, positives, negatives = SASRecDataset(
+        data.train, data.num_items, max_len=20
+    )[0]
+    assert inputs.shape == positives.shape == negatives.shape == (20,)
+    observed_inputs = inputs[inputs.ne(0)]
+    observed_targets = positives[positives.ne(0)]
+    assert torch.equal(observed_inputs[1:], observed_targets[:-1])
+
+
 def test_model_score_shapes():
     data = synthetic_data(num_users=4)
     mf = MatrixFactorization(data.num_users, data.num_items, dim=8)

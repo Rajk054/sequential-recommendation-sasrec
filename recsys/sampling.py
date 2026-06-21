@@ -50,8 +50,9 @@ class SASRecDataset(Dataset):
     def __getitem__(self, index: int):
         user = self.users[index]
         sequence = self.sequences[user]
-        inputs = sequence[-(self.max_len + 1) : -1]
-        positives = sequence[-self.max_len :]
+        window = sequence[-(self.max_len + 1) :]
+        inputs = window[:-1]
+        positives = window[1:]
         excluded = set(sequence)
         rng = random.Random(self.seed + index)
         negatives = [sample_negative(self.num_items, excluded, rng) for _ in positives]
