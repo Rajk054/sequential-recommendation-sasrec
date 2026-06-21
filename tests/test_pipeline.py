@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pandas as pd
 import torch
 
 from recsys.data import load_movielens, synthetic_data
@@ -11,7 +10,13 @@ from recsys.sampling import PointwiseDataset, SASRecDataset, padded_history
 def test_leave_two_out_is_chronological(tmp_path: Path):
     rows = [(1, item, 5, item * 10) for item in range(1, 6)]
     path = tmp_path / "ratings.dat"
-    pd.DataFrame(rows).to_csv(path, sep="::", header=False, index=False)
+    path.write_text(
+        "\n".join(
+            f"{user}::{item}::{rating}::{timestamp}"
+            for user, item, rating, timestamp in rows
+        ),
+        encoding="utf-8",
+    )
     data = load_movielens(path)
     assert data.train[1] == [1, 2, 3]
     assert data.validation[1] == 4
@@ -41,4 +46,3 @@ def test_model_score_shapes():
     inputs, positives, negatives = SASRecDataset(data.train, data.num_items, 8)[0]
     pos_logits, neg_logits = model.training_logits(inputs[None], positives[None], negatives[None])
     assert pos_logits.shape == neg_logits.shape == (1, 8)
-
